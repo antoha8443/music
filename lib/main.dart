@@ -4,6 +4,8 @@ import 'models/folder.dart';
 import 'db/database_helper.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:just_audio/just_audio.dart';
+import 'dart:async';
+import 'package:flutter/services.dart';
 
 void main() {
   runApp(const MusicLibraryApp());
@@ -159,20 +161,14 @@ class _TrackListScreenState extends State<TrackListScreen> {
     });
   }
 
-  Future<void> _playTrack(String? filePath) async {
-    if (filePath != null) {
-      try {
-        await _player.setFilePath(filePath);
-        await _player.play();
-        debugPrint('Playing: $filePath');
-      } catch (e) {
-        debugPrint('Error playing track: $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error playing track: $e')),
-          );
-        }
-      }
+  Future<void> _playTrack(Track track) async {
+    if (track.filePath != null) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => AudioPlayerScreen(track: track),
+        ),
+      );
     } else {
       debugPrint('No audio file selected for this track');
       if (mounted) {
@@ -209,14 +205,14 @@ class _TrackListScreenState extends State<TrackListScreen> {
                 margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
                 child: ListTile(
                   title: Text(track.title),
-                  subtitle: Text('${track.artist} - ${track.duration ~/ 60}:${track.duration % 60}'),
+                  subtitle: Text('${track.artist} - ${track.duration ~/ 60}:${(track.duration % 60).toString().padLeft(2, '0')}'),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (track.filePath != null)
                         IconButton(
                           icon: const Icon(Icons.play_arrow),
-                          onPressed: () => _playTrack(track.filePath),
+                          onPressed: () => _playTrack(track),
                         ),
                       IconButton(
                         icon: const Icon(Icons.edit),
@@ -271,6 +267,16 @@ class _AddTrackScreenState extends State<AddTrackScreen> {
   final _artistController = TextEditingController();
   final _durationController = TextEditingController();
   String? _filePath;
+  final _audioPlayer = AudioPlayer();
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _artistController.dispose();
+    _durationController.dispose();
+    _audioPlayer.dispose();
+    super.dispose();
+  }
 
   Future<void> _pickAudioFile() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -278,19 +284,27 @@ class _AddTrackScreenState extends State<AddTrackScreen> {
     );
 
     if (result != null && result.files.single.path != null) {
+      final path = result.files.single.path!;
       setState(() {
-        _filePath = result.files.single.path;
+        _filePath = path;
       });
+      
+      // Получаем длительность аудиофайла
+      try {
+        await _audioPlayer.setFilePath(path);
+        final duration = await _audioPlayer.duration;
+        if (duration != null) {
+          setState(() {
+            _durationController.text = duration.inSeconds.toString();
+          });
+          debugPrint('Audio duration: ${duration.inSeconds} seconds');
+        }
+      } catch (e) {
+        debugPrint('Error getting audio duration: $e');
+      }
+      
       debugPrint('Selected audio file: $_filePath');
     }
-  }
-
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _artistController.dispose();
-    _durationController.dispose();
-    super.dispose();
   }
 
   @override
@@ -379,6 +393,7 @@ class _EditTrackScreenState extends State<EditTrackScreen> {
   late TextEditingController _artistController;
   late TextEditingController _durationController;
   String? _filePath;
+  final _audioPlayer = AudioPlayer();
 
   @override
   void initState() {
@@ -389,25 +404,42 @@ class _EditTrackScreenState extends State<EditTrackScreen> {
     _filePath = widget.track.filePath;
   }
 
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _artistController.dispose();
+    _durationController.dispose();
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
   Future<void> _pickAudioFile() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.audio,
     );
 
     if (result != null && result.files.single.path != null) {
+      final path = result.files.single.path!;
       setState(() {
-        _filePath = result.files.single.path;
+        _filePath = path;
       });
+      
+      // Получаем длительность аудиофайла
+      try {
+        await _audioPlayer.setFilePath(path);
+        final duration = await _audioPlayer.duration;
+        if (duration != null) {
+          setState(() {
+            _durationController.text = duration.inSeconds.toString();
+          });
+          debugPrint('Audio duration: ${duration.inSeconds} seconds');
+        }
+      } catch (e) {
+        debugPrint('Error getting audio duration: $e');
+      }
+      
       debugPrint('Selected audio file: $_filePath');
     }
-  }
-
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _artistController.dispose();
-    _durationController.dispose();
-    super.dispose();
   }
 
   @override
@@ -475,6 +507,197 @@ class _EditTrackScreenState extends State<EditTrackScreen> {
                   style: const TextStyle(fontSize: 12),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Экран аудио плеера
+class AudioPlayerScreen extends StatefulWidget {
+  final Track track;
+
+  const AudioPlayerScreen({super.key, required this.track});
+
+  @override
+  _AudioPlayerScreenState createState() => _AudioPlayerScreenState();
+}
+
+class _AudioPlayerScreenState extends State<AudioPlayerScreen> {
+  late AudioPlayer _player;
+  bool _isPlaying = false;
+  Duration _duration = Duration.zero;
+  Duration _position = Duration.zero;
+  StreamSubscription<PlayerState>? _playerStateSubscription;
+  StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<Duration?>? _durationSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = AudioPlayer();
+    _initAudioPlayer();
+  }
+
+  Future<void> _initAudioPlayer() async {
+    // Инициализация слушателей событий
+    _playerStateSubscription = _player.playerStateStream.listen((state) {
+      if (mounted) {
+        setState(() {
+          _isPlaying = state.playing;
+        });
+      }
+    });
+
+    _positionSubscription = _player.positionStream.listen((position) {
+      if (mounted) {
+        setState(() {
+          _position = position;
+        });
+      }
+    });
+
+    _durationSubscription = _player.durationStream.listen((duration) {
+      if (mounted && duration != null) {
+        setState(() {
+          _duration = duration;
+        });
+      }
+    });
+
+    // Загрузка и воспроизведение трека
+    try {
+      await _player.setFilePath(widget.track.filePath!);
+      await _player.play();
+    } catch (e) {
+      debugPrint('Error initializing player: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error playing track: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _playerStateSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _durationSubscription?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
+
+  String _formatDuration(Duration duration) {
+    String twoDigits(int n) => n.toString().padLeft(2, '0');
+    final minutes = twoDigits(duration.inMinutes.remainder(60));
+    final seconds = twoDigits(duration.inSeconds.remainder(60));
+    return '$minutes:$seconds';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Now Playing'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // Информация о треке
+            Text(
+              widget.track.title,
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              widget.track.artist,
+              style: const TextStyle(
+                fontSize: 18,
+                color: Colors.grey,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 32),
+            
+            // Слайдер для перемотки
+            Slider(
+              min: 0,
+              max: _duration.inSeconds.toDouble(),
+              value: _position.inSeconds.toDouble().clamp(0, _duration.inSeconds.toDouble()),
+              onChanged: (value) {
+                final position = Duration(seconds: value.toInt());
+                _player.seek(position);
+              },
+            ),
+            
+            // Отображение времени
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(_formatDuration(_position)),
+                  Text(_formatDuration(_duration)),
+                ],
+              ),
+            ),
+            
+            const SizedBox(height: 32),
+            
+            // Кнопки управления
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Перемотка назад на 10 секунд
+                IconButton(
+                  iconSize: 48,
+                  icon: const Icon(Icons.replay_10),
+                  onPressed: () {
+                    final newPosition = Duration(
+                      seconds: (_position.inSeconds - 10).clamp(0, _duration.inSeconds),
+                    );
+                    _player.seek(newPosition);
+                  },
+                ),
+                
+                const SizedBox(width: 16),
+                
+                // Кнопка воспроизведения/паузы
+                IconButton(
+                  iconSize: 64,
+                  icon: Icon(_isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled),
+                  onPressed: () {
+                    if (_isPlaying) {
+                      _player.pause();
+                    } else {
+                      _player.play();
+                    }
+                  },
+                ),
+                
+                const SizedBox(width: 16),
+                
+                // Перемотка вперед на 10 секунд
+                IconButton(
+                  iconSize: 48,
+                  icon: const Icon(Icons.forward_10),
+                  onPressed: () {
+                    final newPosition = Duration(
+                      seconds: (_position.inSeconds + 10).clamp(0, _duration.inSeconds),
+                    );
+                    _player.seek(newPosition);
+                  },
+                ),
+              ],
+            ),
           ],
         ),
       ),

@@ -20,4 +20,42 @@ export class AudioPlayer {
             });
         }
     }
+
+    public pauseAudio(): void {
+        if (this.audioElement) {
+            this.audioElement.pause();
+        }
+    }
+
+    public seekTo(time: number): void {
+        if (this.audioElement) {
+            this.audioElement.currentTime = time;
+        }
+    }
+
+    public getCurrentTime(): number {
+        return this.audioElement ? this.audioElement.currentTime : 0;
+    }
+
+    public getDuration(): number {
+        return this.audioElement ? this.audioElement.duration : 0;
+    }
+
+    public skipForward(seconds: number = 10): void {
+        if (this.audioElement) {
+            this.audioElement.currentTime = Math.min(
+                this.audioElement.currentTime + seconds,
+                this.audioElement.duration
+            );
+        }
+    }
+
+    public skipBackward(seconds: number = 10): void {
+        if (this.audioElement) {
+            this.audioElement.currentTime = Math.max(
+                this.audioElement.currentTime - seconds,
+                0
+            );
+        }
+    }
 }
